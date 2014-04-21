@@ -18,11 +18,9 @@
   "author": "Richard Rodger (http://richardrodger.com)",
   "license": "MIT",
   "dependencies": {
-    "kafkaesque": "~0.0.8",
-    "nid": "~0.3.2",
-    "underscore": "~1.6.0",
-    "uuid": "~1.4.1",
-    "node-zookeeper-client": "~0.2.1"
+    "kafka-node": "0.1.9",
+    "underscore": "1.6.0",
+    "uuid": "1.4.1"
   },
   "peerDependencies": {
     "seneca": "*"

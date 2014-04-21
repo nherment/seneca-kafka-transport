@@ -1,71 +1,125 @@
 'use strict';
 
-var nid = require('nid');
-var busOptions = { zkroot: 'localhost:2181', namespace: 'canon', start: 'all' };
-
+var kafka = require('kafka-node');
+var FullDuplexClient = require('./lib/FullDuplexClient.js')
+var uuid = require('uuid')
 
 
 module.exports = function( options ) {
   var seneca = this;
   var plugin = 'kafka-transport';
-  var listenBus;
-  var listenSlot;
-  var clientBus;
-  var clientSlot;
 
 
   options = seneca.util.deepextend({
-    topicprefix:'seneca_',
-    groupprefix:'seneca_',
-    partition:0,
-    queue: {
-      brokers: [{
-        host: 'localhost',
-        port: 9092
-      }],
-      clientid:nid(),
-      maxbytes:9999999
-    }
+    topicPrefix: 'seneca_',
+    partition: 0,
+    zkHost: 'localhost',
+    zkPort: 2181,
+    zkPath: '/'
   }, options);
+
+  var requestTopic = options.topicPrefix + 'request'
+  var responseTopic = options.topicPrefix + 'response'
+
+  function kafkaClient(){
+    return new kafka.Client(options.zkHost + ':' + options.zkPort + options.zkPath, uuid.v4(), {
+      sessionTimeout: 10000,
+      spinDelay : 1000,
+      retries : 3
+    })
+  }
+
+  var callMap = {}
+
+  var client
+  var listener
 
 
   if (!seneca.hasplugin('transport')) {
     seneca.use('transport');
   }
 
+  function initializeClient(callback) {
+    if(client) {
+      callback(undefined)
+    } else {
+      var c = new FullDuplexClient(kafkaClient(), requestTopic, responseTopic)
+      c.on('ready', function(err) {
+        if(err) {
+          callback(err)
+        } else {
+          client = c
+
+          client.on('message', function(message) {
+            var call = callMap[message.id];
+            if( call ) {
+              console.log('processing external response >', message.id)
+              delete callMap[message.id];
+              call(message.err ? new Error(message.err) : null, message.res);
+            }
+          })
+
+          callback(undefined)
+        }
+      })
+    }
+
+  }
+
+  function resumeSenecaContext(globalSeneca, args) {
+    var augmentedParams = {}
+    for(var attr in args) {
+      if(~attr.indexOf('$')) {
+        augmentedParams[attr] = args[attr]
+      }
+    }
+    return globalSeneca.delegate(augmentedParams)
+  }
 
 
-  /**
-   * TODO: topic name to come from config
-   */
   function hookListenQueue(args, done) {
     var seneca = this;
 
-    listenBus = require('./lib/kafka/bus')(busOptions);
-    listenBus.setup(function(err) {
-      if (err) {
-        console.log(err);
-      }
+    if(listener) {
+      done(undefined)
+    } else {
+      var l = new FullDuplexClient(kafkaClient(), responseTopic, requestTopic)
+      l.on('ready', function(err) {
+        if(err) {
+          console.log(err)
+          done(err)
+        } else {
+          listener = l
+          setImmediate(done)
 
-      listenBus.register({topicName: 'request'},
-      function(err, slot) {
-        if (err) { console.log(err); }
-        listenSlot = slot;
-      },
-      function(message, respond) {
-        if ('act' === message.request.kind) {
-          seneca.act(message.request.act, function(err,res){
-            var outmsg = {kind:'res',
-                          id:message.request.id,
-                          err:err?err.message:null,
-                          res:res};
-            respond(message, outmsg);
-          });
+          listener.on('message', function(message) {
+            console.log('received external request <', message.id)
+            if(message.kind === 'act') {
+
+
+              var s = resumeSenecaContext(seneca, data.act)
+
+              s.act(message.act, function(err, res){
+                if(err) {
+                  // I do not want to magically swallow the stack trace so I print it here
+                  // TODO: ideally it should be passed to the client
+                  console.log(err)
+                }
+                var outmsg = {
+                  id   : message.id,
+                  err  : err ? err.message : null,
+                  res  : res
+                }
+                console.log('responding to external request >', message.id)
+                listener.send([outmsg])
+              })
+            }
+
+          })
+
         }
-      });
-    });
-    seneca.log.info('listen', args.host, args.port, seneca.toString());
-    done();
+      })
+    }
   }
 
 
@@ -74,69 +128,42 @@ module.exports = function( options ) {
    * TODO: topic name to come from config
    */
   function hookClientQueue( args, done ) {
-    var seneca = this;
-    var callmap = {};
+    var seneca = this
 
-    clientBus = require('./lib/kafka/bus')(busOptions);
-    clientBus.setup(function(err) {
+    initializeClient(function(err) {
+      if(err) {
+        done(err, undefined)
+      } else {
+        done(undefined, function(args, callback) {
+          var messageId = uuid.v4()
 
-      if (err) {
-        console.log(err);
+          callMap[messageId] = callback
+
+          var outMsg = {
+            id:   messageId,
+            kind: 'act',
+            act:  args
+          }
+
+          console.log('sending external request>', outMsg.id)
+
+          client.send([outMsg])
+        })
       }
 
-      clientBus.register({topicName: 'response', responseChannel: true},
-      function(err, slot) {
-        if (err) {
-          console.log(err);
-        }
-        else {
-          clientSlot = slot;
+    })
 
-          var client = function(args, done) {
-            var outmsg = {
-              id:   nid(),
-              kind: 'act',
-              act:  args
-            };
-            callmap[outmsg.id] = {done:done};
-            clientBus.request({topicName: 'request'}, outmsg);
-          };
-          seneca.log.info('client', 'pubsub', args.host, args.port, seneca.toString());
-          done(null,client);
-        }
-      },
-      function(message) {
-        var call = callmap[message.response.id];
-        if( call ) {
-          delete callmap[message.response.id];
-          call.done(message.response.err ? new Error(message.response.err) : null, message.response.res);
-        }
-      });
-    });
+
   }
 
-
-
   var shutdown = function(args, done) {
-    if (listenBus) {
-      listenBus.deregister('request', listenSlot, function(err) {
-        if (err) { console.log('shutdown error: ' + err); }
-        done();
-      });
-    }
-    else if (clientBus) {
-      clientBus.deregister('response', clientSlot, function(err) {
-        if (err) { console.log('shutdown error: ' + err); }
-        done();
-      });
-    }
+    client.close(done)
   };
-
 
   seneca.add({role:'transport',hook:'listen',type:'queue'}, hookListenQueue);
   seneca.add({role:'transport',hook:'client',type:'queue'}, hookClientQueue);
   seneca.add({role:'seneca',cmd:'close'}, shutdown);
- 
+
   return {
     name: plugin,
   };
