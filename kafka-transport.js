@@ -97,7 +97,7 @@ module.exports = function( options ) {
             if(message.kind === 'act') {
 
 
-              var s = resumeSenecaContext(seneca, data.act)
+              var s = resumeSenecaContext(seneca, message.act)
 
               s.act(message.act, function(err, res){
                 if(err) {
