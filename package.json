@@ -18,7 +18,7 @@
   "author": "Richard Rodger (http://richardrodger.com)",
   "license": "MIT",
   "dependencies": {
-    "kafka-node": "0.1.9",
+    "kafka-node": "git://github.com/nherment/kafka-node#master",
     "underscore": "1.6.0",
     "uuid": "1.4.1"
   },
